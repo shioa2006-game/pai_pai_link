@@ -49,57 +49,146 @@
   }
 
   // ------------------------------
-  // 牌描画ヘルパー
+  // 牌描画（テキスト顔）— 正方形タイル版
   // ------------------------------
-  function suitBorderColor(suit) {
-    if (suit === 'man') return color(231, 76, 60);
-    if (suit === 'pin') return color(52, 152, 219);
-    if (suit === 'sou') return color(46, 204, 113);
-    return color(44, 62, 80);
-  }
-  function textColorByPiece(t) {
-    if (t.isRed) return color(231, 76, 60);
-    if (t.suit === 'honor') {
-      if (t.honor === 'C') return color(231, 76, 60);
-      if (t.honor === 'F') return color(46, 204, 113);
-      return color(44, 62, 80);
-    }
-    if (t.suit === 'man') return color(44, 62, 80);
-    if (t.suit === 'pin') return color(52, 152, 219);
-    if (t.suit === 'sou') return color(46, 204, 113);
-    return color(44, 62, 80);
-  }
-  function labelOf(t) {
-    if (!t) return '';
-    if (t.suit === 'honor') {
-      const m = { E: '東', S: '南', W: '西', N: '北', P: '白', F: '發', C: '中' };
-      return m[t.honor] || '?';
-    }
-    const s = { man: '萬', pin: '筒', sou: '索' }[t.suit] || '';
-    return `${t.num}${s}`;
-  }
-  function drawTile(t, x, y, size) {
-    if (!t) return; // 安全ガード
-    push();
-    noStroke();
-    fill(255);
-    rect(x, y, size, size, 6);
-    strokeWeight(3);
-    stroke(suitBorderColor(t.suit));
-    noFill();
-    rect(x, y, size, size, 6);
+  const FACE_COL = {
+    man: "#c62828", // 萬（「萬」は常に赤）
+    pin: "#1565c0",
+    sou: "#2e7d32",
+    wind: "#111",
+    dragon_chun: "#c62828",
+    dragon_hatsu:"#2e7d32",
+    dragon_haku: "#111"
+  };
+  const KANJI_NUM = ["一","二","三","四","五","六","七","八","九"];
+  const ROMAN_NUM = ["Ⅰ","Ⅱ","Ⅲ","Ⅳ","Ⅴ","Ⅵ","Ⅶ","Ⅷ","Ⅸ"];
+  const MARU_NUM  = ["①","②","③","④","⑤","⑥","⑦","⑧","⑨"];
 
-    fill(textColorByPiece(t));
-    noStroke();
-    textAlign(CENTER, CENTER);
-    textSize(size * 0.45);
-    text(labelOf(t), x + size / 2, y + size / 2);
-    pop();
+  // 角丸矩形
+  function roundRect(ctx, x, y, w, h, r){
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+rr, y);
+    ctx.arcTo(x+w, y, x+w, y+h, rr);
+    ctx.arcTo(x+w, y+h, x, y+h, rr);
+    ctx.arcTo(x, y+h, x, y, rr);
+    ctx.arcTo(x, y, x+w, y, rr);
+    ctx.closePath();
+  }
+
+  // Piece -> painter option
+  function pieceToOpt(t){
+    if (!t) return null;
+    if (t.suit === 'honor'){
+      if (t.honor === 'P') return { type:'dragon', dragon:'haku' };
+      if (t.honor === 'F') return { type:'dragon', dragon:'hatsu' };
+      if (t.honor === 'C') return { type:'dragon', dragon:'chun' };
+      return { type:'wind', wind: t.honor || 'E' };
+    }
+    return { type: t.suit, num: t.num || 1, isRed: !!t.isRed };
+  }
+
+  // タイル描画（ctx）
+  function drawTileCanvas2D(ctx, x, y, size, opt){
+    if (!opt) return;
+    const w = size, h = size; // 正方形
+    const r = Math.round(size * 0.18);
+    const cx = x + w/2;
+    const cy = y + h/2;
+
+    ctx.save();
+    // 台座（白）
+    roundRect(ctx, x, y, w, h, r);
+    ctx.fillStyle = "#fff";
+    ctx.fill();
+    // 内枠
+    ctx.lineWidth = Math.max(1.5, size * 0.06);
+    ctx.strokeStyle = "#333";
+    ctx.lineJoin = "round";
+    ctx.stroke();
+
+    // 数牌
+    if (opt.type === "man" || opt.type === "pin" || opt.type === "sou"){
+      const suitText = (opt.type === 'man') ? "萬" : (opt.type === 'pin' ? "筒" : "索");
+      const suitCol  = (opt.type === 'man') ? FACE_COL.man : (opt.type === 'pin' ? FACE_COL.pin : FACE_COL.sou);
+
+      let topText = "?";
+      if (opt.type === 'man') topText = KANJI_NUM[(opt.num||1)-1] || "?";
+      if (opt.type === 'pin') topText = MARU_NUM[(opt.num||1)-1] || String(opt.num||1);
+      if (opt.type === 'sou') topText = ROMAN_NUM[(opt.num||1)-1] || "?";
+
+      const numCol  = opt.isRed ? FACE_COL.dragon_chun : (opt.type === 'man' ? "#111" : suitCol);
+      const suitColFinal = suitCol; // 「萬」は常に赤
+
+      const numSize  = Math.round(size * 0.60);
+      const suitSize = Math.round(size * 0.46);
+
+      ctx.fillStyle = numCol;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.font = `bold ${numSize}px "Noto Sans JP", system-ui, sans-serif`;
+      ctx.fillText(topText, cx, y + size * 0.46);
+
+      ctx.fillStyle = suitColFinal;
+      ctx.textBaseline = "hanging";
+      ctx.font = `bold ${suitSize}px "Noto Sans JP", system-ui, sans-serif`;
+      ctx.fillText(suitText, cx, y + size * 0.52);
+
+      ctx.restore();
+      return;
+    }
+
+    // 風牌
+    if (opt.type === "wind"){
+      const map = {E:"東", S:"南", W:"西", N:"北"};
+      ctx.fillStyle = FACE_COL.wind;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = `bold ${Math.round(size * 0.60)}px "Noto Sans JP", system-ui, sans-serif`;
+      ctx.fillText(map[opt.wind] || "？", cx, cy);
+      ctx.restore();
+      return;
+    }
+
+    // 三元牌
+    if (opt.type === "dragon"){
+      if (opt.dragon === "haku"){
+        // 白は文字なし
+      } else if (opt.dragon === "hatsu"){
+        ctx.fillStyle = FACE_COL.dragon_hatsu;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = `bold ${Math.round(size * 0.60)}px "Noto Sans JP", system-ui, sans-serif`;
+        ctx.fillText("發", cx, cy);
+      } else {
+        ctx.fillStyle = FACE_COL.dragon_chun;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = `bold ${Math.round(size * 0.60)}px "Noto Sans JP", system-ui, sans-serif`;
+        ctx.fillText("中", cx, cy);
+      }
+      ctx.restore();
+      return;
+    }
+
+    ctx.restore();
+  }
+
+  // 既存APIを維持：Piece→Canvas2D描画
+  function drawTile(piece, x, y, size){
+    const ctx = (window.drawingContext || (window._renderer && window._renderer.drawingContext));
+    if (!ctx) return;
+    const opt = pieceToOpt(piece);
+    drawTileCanvas2D(ctx, x, y, size, opt);
   }
 
   // keys からダミー牌を生成（CPUプレビュー/ホールド描画用）
   function tileFromKey(k) {
     if (!k) return null;
+    if (Array.isArray(k)) k = k[0];
+    if (typeof k === 'object' && k.key) k = k.key;
+    if (typeof k !== 'string') return null;
+
     if (k.startsWith('h_')) {
       const h = k.split('_')[1];
       return new P.Piece(-1, 'honor', null, h, false, 'cpu');
@@ -158,7 +247,7 @@
     fill(44, 62, 80); textAlign(LEFT, TOP); textSize(16);
     text(`残り牌: ${remain}/${total}`, panelX, panelY + 18);
 
-    // NEXT（落下中は固定表示）
+    // NEXT
     text(`NEXT:`, panelX, panelY + 44);
     if (Array.isArray(game.nextQ)) {
       if (game.nextQ[0]) drawTile(game.nextQ[0], panelX + 60, panelY + 36, 28);
@@ -257,19 +346,33 @@
     drawBtn(btnX1, btnY, '手牌', 'hand');
     drawBtn(btnX2, btnY, '捨て牌', 'discard');
 
-    // タイル一覧
+    // タイル一覧（ダブル枠）
     const listX = X + 16, listY = btnY + 40;
     let dx = listX, dy = listY;
     const TILE = 30, STEP = 36;
     const showTiles = sortTiles(game.allocTiles);
+
+    // 枠色を明示（手牌＝青 / 捨て牌＝赤）
+    const HAND_BORDER = color(52, 152, 219);
+    const DISC_BORDER = color(231, 76, 60);
+
     for (const t of showTiles) {
       const assign = game.allocAssign.get(t.id) || 'hand';
+      const frameCol = (assign === 'discard') ? DISC_BORDER : HAND_BORDER;
+
+      // 外側ハイライト枠（指定：捨て牌は赤）
       push();
-      noStroke(); fill(255); rect(dx, dy, TILE, TILE, 6);
-      stroke(assign === 'hand' ? color(52, 152, 219) : color(231, 76, 60));
-      strokeWeight(3); noFill(); rect(dx, dy, TILE, TILE, 6);
+      noFill();
+      stroke(frameCol);
+      strokeWeight(3.5);
+      strokeJoin(ROUND);
+      rect(dx, dy, TILE, TILE, 6);
+
+      // 牌（内枠つき）
       drawTile(t, dx, dy, TILE);
       pop();
+
+      // ヒットボックス
       UI.Hitbox.add(dx, dy, TILE, TILE, { type: 'alloc-tile', tileId: t.id });
 
       dx += STEP;
@@ -297,7 +400,7 @@
       fill(44, 62, 80);
     }
 
-    // 手牌プレビュー（下部）
+    // 手牌プレビュー（下部）— 手牌のみ表示
     let px = X + 16, py = Y + H - 90;
     fill(44, 62, 80); text('手牌プレビュー', px, py - 20);
     const hands = [];
@@ -348,7 +451,6 @@
 
     if (game.playerHold && game.playerHold.won) {
       const melds = game.playerHold.melds || [];
-      // プレイヤー：牌オブジェクト配列
       if (Array.isArray(melds[0])) {
         for (const arr of melds) {
           const t1 = arr[0], t2 = arr[1], t3 = arr[2];
@@ -356,7 +458,6 @@
           px += 90;
         }
       } else if (melds[0] && melds[0].type) {
-        // 念のためキー形式にも対応
         for (const m of melds) {
           if (m.type === 'triplet') {
             const t = tileFromKey(m.key || (m.keys && m.keys[0]));
@@ -371,7 +472,6 @@
           }
         }
       }
-      // 雀頭
       if (Array.isArray(game.playerHold.pair) && game.playerHold.pair.length >= 2) {
         drawTile(game.playerHold.pair[0], X + 20, py + 36, 26);
         drawTile(game.playerHold.pair[1], X + 48, py + 36, 26);
