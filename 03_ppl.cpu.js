@@ -1,4 +1,4 @@
-// 03_ppl.cpu.js // CPUロジック
+// 03_ppl.cpu.js // CPUロジック（厳密解フォールバック付き）
 (function () {
   const P = (window.PPL = window.PPL || {});
   const CPU = (P.CPU = P.CPU || {});
@@ -106,16 +106,17 @@
     return { hand, usedBoardTiles, usedDiscardTiles };
   }
 
-  // ---- CPU：和了判定（HOLD表示用：pairは「文字列」） ----
+  // ---- CPU：和了判定（UI互換返却） ----
+  // UI側は pair を「キー配列（2要素）」として描画するため、それに合わせる。
   CPU.tryWin = function tryWin(boardPieces, discards /*, game */) {
     const boardArr = Array.isArray(boardPieces) ? boardPieces : (boardPieces?.board || []);
     const discArr  = Array.isArray(discards)    ? discards    : (boardPieces?.disc  || []);
     const poolLen = boardArr.length + discArr.length;
     if (poolLen < 14) return { won: false, reason: 'pool<14' };
 
+    // ---------- まずは従来の軽探索 ----------
     const counts = buildCountsFromTiles(boardArr.concat(discArr));
 
-    // 雀頭候補を一つ選び、残りで4面子をDFS
     for (const pk in counts) {
       if ((counts[pk] | 0) < 2) continue;
       const c2 = cloneCounts(counts);
@@ -128,14 +129,54 @@
         const { hand, usedBoardTiles, usedDiscardTiles } = realized;
         const score = CPU.basicScore(hand);
 
-        // ★ UI契約：pair は文字列キー（'pin_5'）
         return {
           won: true,
-          hand,               // 実タイル（内部用：赤カウント等）
-          pair: pk,           // ★ HOLDの tileFromKey が文字列を期待
-          melds,              // {type, keys:[...]}（キー配列）
-          usedBoardTiles,     // 盤面除去用
-          usedDiscardTiles,   // 捨て牌消費用
+          hand,
+          pair: [pk, pk],      // UI描画用（startsWith可）
+          melds,               // {type, keys:[...]} の配列
+          usedBoardTiles,
+          usedDiscardTiles,
+          score
+        };
+      }
+    }
+
+    // ---------- フォールバック：厳密解 ----------
+    if (P.MJ && typeof P.MJ.solveFromPool === 'function') {
+      const pool = boardArr.concat(discArr);
+      const res = P.MJ.solveFromPool(pool);
+      if (res && res.won) {
+        // 使った実タイルは res.hand（14枚）に入っている
+        const discSet = new Set(discArr);
+        const usedBoardTiles = [];
+        const usedDiscardTiles = [];
+        for (const t of res.hand) {
+          if (discSet.has(t)) usedDiscardTiles.push(t); else usedBoardTiles.push(t);
+        }
+
+        // UI互換のため melds を {type, keys} に変換
+        const typedMelds = [];
+        for (const m of res.melds || []) {
+          if (!Array.isArray(m) || m.length !== 3) continue;
+          const k1 = keyOf(m[0]), k2 = keyOf(m[1]), k3 = keyOf(m[2]);
+          if (k1 === k2 && k2 === k3) {
+            typedMelds.push({ type: 'triplet', keys: [k1, k2, k3] });
+          } else {
+            // 数牌の並びであることを前提（solveFromPoolが作るのは順子or刻子）
+            typedMelds.push({ type: 'sequence', keys: [k1, k2, k3] });
+          }
+        }
+        // pair はキー配列へ
+        let pairKey = keyOf((res.pair && res.pair[0]) || res.hand[0]);
+        const score = CPU.basicScore(res.hand);
+
+        return {
+          won: true,
+          hand: res.hand,
+          pair: [pairKey, pairKey],
+          melds: typedMelds,
+          usedBoardTiles,
+          usedDiscardTiles,
           score
         };
       }
@@ -144,7 +185,8 @@
     return { won: false, reason: 'no-combo' };
   };
 
-  // ---- CPU：成立状況プレビュー（HUD用：pairは {key:文字列}） ----
+  // ---- CPU：成立状況プレビュー（UI用） ----
+  // こちらも pair はキー配列に統一する。
   CPU.previewPartial = CPU.previewPartial || function previewPartial(poolOrBoard, discards) {
     let pool = [];
     if (Array.isArray(poolOrBoard)) pool = poolOrBoard.concat(discards || []);
@@ -171,9 +213,9 @@
       }
     }
 
-    // 雀頭候補（HUDは {key:'...'} を期待）
+    // 雀頭候補（あれば配列化）
     let pair = null;
-    for (const k in counts) if ((counts[k] | 0) >= 2) { pair = { key: k }; break; }
+    for (const k in counts) if ((counts[k] | 0) >= 2) { pair = [k, k]; break; }
 
     const won = !!(pair && melds.length === 4);
     return { won, melds, pair };
