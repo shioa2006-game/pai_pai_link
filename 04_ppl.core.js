@@ -1,5 +1,6 @@
 // 04_ppl.core.js
 // p5.js から直接呼ばれる setup/draw を含む“中核”モジュール
+
 (function () {
   'use strict';
   const PPL = (window.PPL = window.PPL || {});
