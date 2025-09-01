@@ -3,29 +3,14 @@
 (function () {
   'use strict';
   const PPL = (window.PPL = window.PPL || {});
-
-  // ---- CFG フォールバック（config未読でも動作） ----
-  const DEFAULT_CFG = {
-    CANVAS_W: 960, CANVAS_H: 540,
-    COLS: 6, ROWS: 12, CELL: 32,
-    BOARD_X: 40, BOARD_Y: 40,
-    FALL_INTERVAL_MS: 800,
-    CHAIN_TICK_MS: 300,
-    DECK_TOTAL: 136,
-    DPR: (window.devicePixelRatio || 1),
-
-    // 既存互換（今回の仕様では未使用扱い）
-    CPU_COOLDOWN_LANDS: 0,
-    CPU_BOARD_MIN: 0,
-    CPU_MAX_WINS: Infinity,
-
-    // 追加（config側が優先）
-    CPU_WIN_PER_HOLD: 1,
-    CPU_CLEAR_POLICY: 'used-only'
+  const C = PPL.getCFG ? PPL.getCFG() : {
+    CANVAS_W: 960, CANVAS_H: 540, COLS: 6, ROWS: 12, CELL: 32, BOARD_X: 40, BOARD_Y: 40,
+    FALL_INTERVAL_MS: 800, CHAIN_TICK_MS: 300, DECK_TOTAL: 136, DPR: (window.devicePixelRatio || 1),
+    CPU_COOLDOWN_LANDS: 0, CPU_BOARD_MIN: 0, CPU_MAX_WINS: Infinity,
+    CPU_WIN_PER_HOLD: 1, CPU_CLEAR_POLICY: 'used-only',
+    BIAS_ENABLED: true, BIAS_WINDOW_PAIRS: 16, BIAS_ZORO_TARGET: 0.24, BIAS_ZORO_MIN: 0.12, BIAS_ZORO_MAX: 0.36,
+    BIAS_ZORO_FEEDBACK: 0.6, BIAS_MAX_STREAK: 2, BIAS_STREAK_PENALTY: 0.2, BIAS_REMAINING_GAMMA: 1.2, BIAS_NOISE_EPS: 1e-3
   };
-  PPL.CFG = PPL.CFG || DEFAULT_CFG;
-  PPL.getCFG = PPL.getCFG || function () { return PPL.CFG; };
-  const C = PPL.getCFG();
 
   // ---- 牌モデル ----
   class Piece {
@@ -36,48 +21,276 @@
       this.honor = honor; // 'E'|'S'|'W'|'N'|'P'|'F'|'C' or null
       this.isRed = isRed;
       this._src   = source;
+      this.isOjama = false;
     }
   }
   PPL.Piece = Piece;
 
-  // ---- 山（136枚） ----
+  // ---- ユーティリティ ----
+  function fyShuffle(arr, rng) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+  }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  // ---- 山（偏り計画器つき） ----
   class Deck {
-    constructor(rng) { this.rng = rng || Math.random; this.p = []; this._create(); this._shuffle(); }
+    constructor(rng) {
+      this.rng = rng || Math.random;
+
+      // スート別バケット
+      this.buckets = {
+        man:   [],
+        pin:   [],
+        sou:   [],
+        honor: []
+      };
+      this._pairBuf = [];  // 次ペアから供給する 2 枚（draw()はここから 1 枚ずつ返す）
+      this.totalLeft = 0;
+
+      // 偏り計画器（A+B）
+      this._planner = new SuitPlanner(this);
+
+      this._create();
+      this._shuffleBuckets();
+    }
+
     _create() {
       let id = 0;
+      // 数牌（萬・筒・索）：各 1..9 を4枚（5の一枚は赤）
       ['man', 'pin', 'sou'].forEach(s => {
-        for (let n = 1; n <= 9; n++) for (let k = 0; k < 4; k++) {
-          const red = (n === 5 && k === 0);
-          this.p.push(new Piece(id++, s, n, null, red, 'deck'));
+        for (let n = 1; n <= 9; n++) {
+          for (let k = 0; k < 4; k++) {
+            const red = (n === 5 && k === 0);
+            const p = new Piece(id++, s, n, null, red, 'deck');
+            this.buckets[s].push(p);
+            this.totalLeft++;
+          }
         }
       });
+      // 字牌（東南西北白發中）各 4 枚
       ['E','S','W','N','P','F','C'].forEach(h => {
-        for (let k = 0; k < 4; k++) this.p.push(new Piece(id++, 'honor', null, h, false, 'deck'));
+        for (let k = 0; k < 4; k++) {
+          const p = new Piece(id++, 'honor', null, h, false, 'deck');
+          this.buckets.honor.push(p);
+          this.totalLeft++;
+        }
       });
     }
-    // ★ 修正：正しいフィッシャー–イェーツ
-    _shuffle() {
-      for (let i = this.p.length - 1; i > 0; i--) {
-        const j = Math.floor(this.rng() * (i + 1));
-        [this.p[i], this.p[j]] = [this.p[j], this.p[i]];
-      }
+
+    _shuffleBuckets() {
+      fyShuffle(this.buckets.man,   this.rng);
+      fyShuffle(this.buckets.pin,   this.rng);
+      fyShuffle(this.buckets.sou,   this.rng);
+      fyShuffle(this.buckets.honor, this.rng);
     }
-    // ★ 堅牢化：null/undefined をスキップ
-    draw() {
-      while (this.p.length > 0) {
-        const t = this.p.pop();
-        if (t) return t;
-      }
-      return null;
+
+    // 在庫枚数
+    _countBySuit() {
+      return {
+        man:   this.buckets.man.length,
+        pin:   this.buckets.pin.length,
+        sou:   this.buckets.sou.length,
+        honor: this.buckets.honor.length
+      };
     }
-    // ★ 残数は実在枚数で数える
+
+    // 指定スートから1枚取り出す
+    _popSuit(suit) {
+      const b = this.buckets[suit];
+      if (!b || b.length === 0) return null;
+      const t = b.pop();
+      if (t) { this.totalLeft--; }
+      return t;
+    }
+
+    // public: 残り総数（ペアバッファも含む）
     remaining() {
-      let n = 0;
-      for (let i = 0; i < this.p.length; i++) if (this.p[i]) n++;
-      return n;
+      return this.totalLeft + this._pairBuf.length;
+    }
+
+    // public: 1 枚ドロー（内部的にはペア単位で計画→バッファ供給）
+    draw() {
+      if (this._pairBuf.length === 0) {
+        if (this.totalLeft <= 0) return null;
+
+        // 残り 1 枚だけのときは単発で供給
+        if (this.totalLeft === 1) {
+          const inv = this._countBySuit();
+          const one = this._planner.pickOneSuit(inv);
+          if (!one) return null;
+          const t = this._popSuit(one);
+          if (t) this._pairBuf.push(t);
+        } else {
+          // 通常：ペアを計画して 2 枚供給
+          const tiles = this._planner.nextPairTiles();
+          for (const t of tiles) if (t) this._pairBuf.push(t);
+        }
+      }
+      return this._pairBuf.shift() || null;
     }
   }
   PPL.Deck = Deck;
+
+  // ---- スート計画器（A+B） ----
+  class SuitPlanner {
+    constructor(deck) {
+      this.deck = deck;
+      this.win = [];           // 直近ペアのゾロ履歴（true/false）
+      this.lastMain = null;    // 直近ペアの主スート
+      this.streak = 0;         // 主スート連続数
+    }
+
+    // ゾロ確率を目標へ寄せる（在庫・上下限を加味）
+    _decideZoro(inv) {
+      const Cfg = C;
+      if (!Cfg.BIAS_ENABLED) return false;
+
+      // 在庫上、ゾロ可能なスートが無ければ false
+      const anyZoroable = (inv.man>=2)||(inv.pin>=2)||(inv.sou>=2)||(inv.honor>=2);
+      if (!anyZoroable) return false;
+
+      const w = this.win;
+      const cur = (w.length === 0) ? Cfg.BIAS_ZORO_TARGET
+                                   : (w.reduce((a,b)=>a+(b?1:0),0) / w.length);
+
+      // 負帰還で目標へ
+      let p = Cfg.BIAS_ZORO_TARGET + Cfg.BIAS_ZORO_FEEDBACK * (Cfg.BIAS_ZORO_TARGET - cur);
+      p = clamp(p, Cfg.BIAS_ZORO_MIN, Cfg.BIAS_ZORO_MAX);
+
+      return (this.deck.rng() < p);
+    }
+
+    // 走り抑制を含むスート重み
+    _weights(inv) {
+      const Cfg = C;
+      const total = inv.man + inv.pin + inv.sou + inv.honor;
+      const g = Math.max(1.0, Cfg.BIAS_REMAINING_GAMMA || 1.0);
+
+      const base = {
+        man:   inv.man   > 0 ? Math.pow(inv.man   / total, g) : 0,
+        pin:   inv.pin   > 0 ? Math.pow(inv.pin   / total, g) : 0,
+        sou:   inv.sou   > 0 ? Math.pow(inv.sou   / total, g) : 0,
+        honor: inv.honor > 0 ? Math.pow(inv.honor / total, g) : 0
+      };
+
+      // 連続上限に達していたら主スートを強く抑制
+      if (this.lastMain && this.streak >= (Cfg.BIAS_MAX_STREAK || 2)) {
+        const pen = Math.max(0, Cfg.BIAS_STREAK_PENALTY || 0.2);
+        base[this.lastMain] *= pen;
+      }
+
+      // 微小ノイズでブレを作る（0 のものには付けない）
+      const eps = Cfg.BIAS_NOISE_EPS || 1e-3;
+      for (const k of ['man','pin','sou','honor']) {
+        if (base[k] > 0) base[k] += eps * this.deck.rng();
+      }
+      return base;
+    }
+
+    _weightedPick(weights, forbidSet) {
+      const entries = [];
+      let sum = 0;
+      for (const k of ['man','pin','sou','honor']) {
+        if (forbidSet && forbidSet.has(k)) continue;
+        const w = weights[k] || 0;
+        if (w > 0) { entries.push([k, w]); sum += w; }
+      }
+      if (entries.length === 0) return null;
+      let r = this.deck.rng() * sum;
+      for (const [k, w] of entries) {
+        r -= w;
+        if (r <= 0) return k;
+      }
+      return entries[entries.length - 1][0];
+    }
+
+    // 在庫だけで 1 スートを選ぶ（単発ドロー用）
+    pickOneSuit(inv) {
+      const w = this._weights(inv);
+      return this._weightedPick(w, null);
+    }
+
+    // 次ペアを計画し、実タイル 2 枚を返す
+    nextPairTiles() {
+      const inv0 = this.deck._countBySuit();
+      const total = inv0.man + inv0.pin + inv0.sou + inv0.honor;
+      if (total <= 0) return [];
+
+      // A: ゾロにするか
+      let zoro = false;
+      if (C.BIAS_ENABLED) {
+        zoro = this._decideZoro(inv0);
+        // 在庫が 2 未満のスートしか無い場合は強制非ゾロ
+        if (zoro) {
+          const zoroable = ['man','pin','sou','honor'].some(s => inv0[s] >= 2);
+          if (!zoroable) zoro = false;
+        }
+      }
+
+      // B: 走り抑制を掛けた重みでスートを選択
+      const weights = this._weights(inv0);
+
+      let tiles = [];
+      let mainSuit = null;
+
+      if (zoro) {
+        // ゾロ：在庫2以上のスートから 1 種を重み選択
+        const forbid = new Set();
+        for (const s of ['man','pin','sou','honor']) if (inv0[s] < 2) forbid.add(s);
+        const s = this._weightedPick(weights, forbid);
+        if (!s) {
+          // フォールバック：非ゾロへ
+          zoro = false;
+        } else {
+          const t1 = this.deck._popSuit(s);
+          const t2 = this.deck._popSuit(s);
+          if (t1) tiles.push(t1);
+          if (t2) tiles.push(t2);
+          mainSuit = s;
+        }
+      }
+
+      if (!zoro) {
+        // 非ゾロ：まず s1 を重み選択 → 次に s2 を（s1 以外から）
+        const s1 = this._weightedPick(weights, null);
+        if (!s1) return []; // 在庫切れの安全弁
+
+        const inv1 = this.deck._countBySuit(); // s1 選択前と同じだが簡便に
+        const w2 = this._weights(inv1);
+        const forbid2 = new Set([s1]);
+        const s2 = this._weightedPick(w2, forbid2);
+        if (!s2) {
+          // s2 が選べない場合（在庫的な偏り）、s1 単色でフォールバック（在庫2未満なら単発×2回扱い）
+          const t1 = this.deck._popSuit(s1);
+          const t2 = this.deck._popSuit(s1);
+          if (t1) tiles.push(t1);
+          if (t2) tiles.push(t2);
+          mainSuit = s1;
+        } else {
+          const t1 = this.deck._popSuit(s1);
+          const t2 = this.deck._popSuit(s2);
+          if (t1) tiles.push(t1);
+          if (t2) tiles.push(t2);
+          mainSuit = s1; // 非ゾロの主スートは最初に選んだ方
+        }
+      }
+
+      // 履歴を更新
+      const isZoro = (tiles.length === 2) && (tiles[0].suit === tiles[1].suit);
+      this.win.push(isZoro);
+      if (this.win.length > (C.BIAS_WINDOW_PAIRS || 16)) this.win.shift();
+
+      if (mainSuit) {
+        if (this.lastMain === mainSuit) this.streak++;
+        else { this.lastMain = mainSuit; this.streak = 1; }
+      }
+
+      return tiles;
+    }
+  }
 
   // ---- 盤面 ----
   class Board {
@@ -89,7 +302,8 @@
     set(x, y, t) { if (x < 0 || x >= this.COLS || y < 0 || y >= this.ROWS) return; this.grid[y][x] = t; }
     isEmpty(x, y) { return this.get(x, y) === null; }
     clearAll() { for (let y = 0; y < this.ROWS; y++) for (let x = 0; x < this.COLS; x++) this.grid[y][x] = null; }
-    // 参照一致で指定の牌だけ除去（重力はかけない）
+
+    // 参照一致の牌だけを除去（重力は掛けない）
     removeTiles(tiles) {
       if (!tiles || !tiles.length) return;
       for (const t of tiles) {
@@ -101,18 +315,31 @@
         }
       }
     }
-    applyGravity() {
+
+    /**
+     * 重力を 1 回適用し、何か 1 枚でも動いたら true を返す（完全収束判定用）
+     */
+    applyGravityMoved() {
+      let moved = false;
       for (let x = 0; x < this.COLS; x++) {
         let write = this.ROWS - 1;
         for (let y = this.ROWS - 1; y >= 0; y--) {
           const t = this.grid[y][x];
           if (t) {
-            if (write !== y) { this.grid[write][x] = t; this.grid[y][x] = null; }
+            if (write !== y) {
+              this.grid[write][x] = t;
+              this.grid[y][x] = null;
+              moved = true;
+            }
             write--;
           }
         }
       }
+      return moved;
     }
+    // 互換API（戻り値は使わない）
+    applyGravity() { this.applyGravityMoved(); }
+
     // 同スート4連結以上で消去
     checkAndClearChains(min = 4) {
       const vis = Array.from({ length: this.ROWS }, () => Array(this.COLS).fill(false));
@@ -216,6 +443,15 @@
       this._prepareNext(4);
     }
 
+    // --- 盤面を完全に落下収束させる（最大 ROWS 回） ---
+    _settleBoardFully() {
+      let tries = 0;
+      while (this.board.applyGravityMoved()) {
+        tries++;
+        if (tries > this.board.ROWS) break; // 安全ブレーク
+      }
+    }
+
     update(dt) {
       switch (this.state) {
         case 'title': this._updateTitle(); break;
@@ -249,7 +485,10 @@
             this.chainCollected.push(...removed);
             return;
           } else {
+            // ★ ここで一度完全収束させてから配置モーダルへ
             this.processing = false;
+            this._settleBoardFully();
+
             if (this.chainCollected.length > 0) {
               const got = this.chainCollected.slice();
               this.chainCollected = [];
@@ -341,13 +580,18 @@
           }
         }
 
-        // HOLDを閉じてプレイ再開（重力はかけずに続行）
+        // ★ ここで必ず盤面を完全落下させ、必要なら連鎖処理を開始
+        this._settleBoardFully();
+        this.processing = true;      // 落下後に消える塊があれば連鎖処理が走る
+        this.chainTimer = 0;
+        this.chainLevel = 0;
+        this.chainCollected = [];
+
+        // HOLDを閉じてプレイ再開
         this.playerHold = null;
         this.cpuHold = null;
         this.holdEvaluated = false;
         this.state = 'play';
-        this.processing = false;
-        this.chainTimer = 0;
       }
     }
 
@@ -389,11 +633,14 @@
       this.allocAssign.clear();
       this.awaitAlloc = false;
 
+      // ★ HOLD に入る直前にも完全収束させてから表示
+      this._settleBoardFully();
+
       this.state = 'hold';
       this.holdEvaluated = false;
     }
 
-    // ★ 修正：nullをキューに入れないように堅牢化
+    // null をキューに入れないように堅牢化
     _prepareNext(n) {
       while (this.nextQ.length < n && this.deck.remaining() > 0) {
         const t = this.deck.draw();
@@ -403,7 +650,7 @@
     }
     _canSupplyNext() { const rest = (this.deck ? this.deck.remaining() : 0) + this.nextQ.length; return rest >= 2; }
 
-    // ★ 追加：ゲーム終了前の自動最終判定（HOLDなしで1回だけ）
+    // ゲーム終了前の自動最終判定（HOLDなしで1回だけ）
     _autoFinalHold() {
       if (this.state !== 'play') return;
 
@@ -413,7 +660,6 @@
         if (pj && pj.won) {
           const sc = (window.PPL.CPU ? window.PPL.CPU.basicScore(pj.hand) : 0);
           this.score += sc;
-          // 手牌のクリアやUIオーバーレイは行わない（最終集計のみ）
         }
       }
 
@@ -425,7 +671,6 @@
         if (cr && cr.won) {
           this.cpuScore += cr.score;
           this.cpuWins++;
-          // 終了直前なので盤面除去は行わない（見た目の変化を避ける）
         }
       }
     }
@@ -439,7 +684,6 @@
       };
     }
 
-    // ★ 修正：2枚そろうまで補充し、無理なら最終判定→終了
     _spawnIfNeeded() {
       if (!this.falling && this.nextQ.length >= 2) {
         let a = this.nextQ.shift();
