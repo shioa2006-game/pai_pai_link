@@ -1,6 +1,5 @@
 // 04_ppl.core.js
 // p5.js から直接呼ばれる setup/draw を含む“中核”モジュール
-
 (function () {
   'use strict';
   const PPL = (window.PPL = window.PPL || {});
@@ -12,6 +11,18 @@
     BIAS_ENABLED: true, BIAS_WINDOW_PAIRS: 16, BIAS_ZORO_TARGET: 0.24, BIAS_ZORO_MIN: 0.12, BIAS_ZORO_MAX: 0.36,
     BIAS_ZORO_FEEDBACK: 0.6, BIAS_MAX_STREAK: 2, BIAS_STREAK_PENALTY: 0.2, BIAS_REMAINING_GAMMA: 1.2, BIAS_NOISE_EPS: 1e-3
   };
+
+  // ---- Seedable RNG（mulberry32）を公開 ----
+  function makeRNG(seed) {
+    let t = (seed >>> 0);
+    return function () {
+      t += 0x6D2B79F5;
+      let r = Math.imul(t ^ (t >>> 15), 1 | t);
+      r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+      return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  PPL.makeRNG = PPL.makeRNG || makeRNG;
 
   // ---- 牌モデル ----
   class Piece {
@@ -42,16 +53,10 @@
       this.rng = rng || Math.random;
 
       // スート別バケット
-      this.buckets = {
-        man:   [],
-        pin:   [],
-        sou:   [],
-        honor: []
-      };
-      this._pairBuf = [];  // 次ペアから供給する 2 枚（draw()はここから 1 枚ずつ返す）
+      this.buckets = { man: [], pin: [], sou: [], honor: [] };
+      this._pairBuf = [];  // 次ペアの2枚を内部保持（drawはここから1枚ずつ返す）
       this.totalLeft = 0;
 
-      // 偏り計画器（A+B）
       this._planner = new SuitPlanner(this);
 
       this._create();
@@ -60,7 +65,6 @@
 
     _create() {
       let id = 0;
-      // 数牌（萬・筒・索）：各 1..9 を4枚（5の一枚は赤）
       ['man', 'pin', 'sou'].forEach(s => {
         for (let n = 1; n <= 9; n++) {
           for (let k = 0; k < 4; k++) {
@@ -71,7 +75,6 @@
           }
         }
       });
-      // 字牌（東南西北白發中）各 4 枚
       ['E','S','W','N','P','F','C'].forEach(h => {
         for (let k = 0; k < 4; k++) {
           const p = new Piece(id++, 'honor', null, h, false, 'deck');
@@ -88,7 +91,6 @@
       fyShuffle(this.buckets.honor, this.rng);
     }
 
-    // 在庫枚数
     _countBySuit() {
       return {
         man:   this.buckets.man.length,
@@ -98,26 +100,20 @@
       };
     }
 
-    // 指定スートから1枚取り出す
     _popSuit(suit) {
       const b = this.buckets[suit];
       if (!b || b.length === 0) return null;
       const t = b.pop();
-      if (t) { this.totalLeft--; }
+      if (t) this.totalLeft--;
       return t;
     }
 
-    // public: 残り総数（ペアバッファも含む）
-    remaining() {
-      return this.totalLeft + this._pairBuf.length;
-    }
+    remaining() { return this.totalLeft + this._pairBuf.length; }
 
-    // public: 1 枚ドロー（内部的にはペア単位で計画→バッファ供給）
     draw() {
       if (this._pairBuf.length === 0) {
         if (this.totalLeft <= 0) return null;
 
-        // 残り 1 枚だけのときは単発で供給
         if (this.totalLeft === 1) {
           const inv = this._countBySuit();
           const one = this._planner.pickOneSuit(inv);
@@ -125,7 +121,6 @@
           const t = this._popSuit(one);
           if (t) this._pairBuf.push(t);
         } else {
-          // 通常：ペアを計画して 2 枚供給
           const tiles = this._planner.nextPairTiles();
           for (const t of tiles) if (t) this._pairBuf.push(t);
         }
@@ -139,37 +134,30 @@
   class SuitPlanner {
     constructor(deck) {
       this.deck = deck;
-      this.win = [];           // 直近ペアのゾロ履歴（true/false）
-      this.lastMain = null;    // 直近ペアの主スート
-      this.streak = 0;         // 主スート連続数
+      this.win = [];        // 直近ペアのゾロ履歴（true/false）
+      this.lastMain = null; // 前回の主スート
+      this.streak = 0;      // 主スート連続
     }
 
-    // ゾロ確率を目標へ寄せる（在庫・上下限を加味）
     _decideZoro(inv) {
-      const Cfg = C;
-      if (!Cfg.BIAS_ENABLED) return false;
+      if (!C.BIAS_ENABLED) return false;
 
-      // 在庫上、ゾロ可能なスートが無ければ false
       const anyZoroable = (inv.man>=2)||(inv.pin>=2)||(inv.sou>=2)||(inv.honor>=2);
       if (!anyZoroable) return false;
 
       const w = this.win;
-      const cur = (w.length === 0) ? Cfg.BIAS_ZORO_TARGET
+      const cur = (w.length === 0) ? C.BIAS_ZORO_TARGET
                                    : (w.reduce((a,b)=>a+(b?1:0),0) / w.length);
 
-      // 負帰還で目標へ
-      let p = Cfg.BIAS_ZORO_TARGET + Cfg.BIAS_ZORO_FEEDBACK * (Cfg.BIAS_ZORO_TARGET - cur);
-      p = clamp(p, Cfg.BIAS_ZORO_MIN, Cfg.BIAS_ZORO_MAX);
+      let p = C.BIAS_ZORO_TARGET + C.BIAS_ZORO_FEEDBACK * (C.BIAS_ZORO_TARGET - cur);
+      p = clamp(p, C.BIAS_ZORO_MIN, C.BIAS_ZORO_MAX);
 
       return (this.deck.rng() < p);
     }
 
-    // 走り抑制を含むスート重み
     _weights(inv) {
-      const Cfg = C;
       const total = inv.man + inv.pin + inv.sou + inv.honor;
-      const g = Math.max(1.0, Cfg.BIAS_REMAINING_GAMMA || 1.0);
-
+      const g = Math.max(1.0, C.BIAS_REMAINING_GAMMA || 1.0);
       const base = {
         man:   inv.man   > 0 ? Math.pow(inv.man   / total, g) : 0,
         pin:   inv.pin   > 0 ? Math.pow(inv.pin   / total, g) : 0,
@@ -177,14 +165,12 @@
         honor: inv.honor > 0 ? Math.pow(inv.honor / total, g) : 0
       };
 
-      // 連続上限に達していたら主スートを強く抑制
-      if (this.lastMain && this.streak >= (Cfg.BIAS_MAX_STREAK || 2)) {
-        const pen = Math.max(0, Cfg.BIAS_STREAK_PENALTY || 0.2);
+      if (this.lastMain && this.streak >= (C.BIAS_MAX_STREAK || 2)) {
+        const pen = Math.max(0, C.BIAS_STREAK_PENALTY || 0.2);
         base[this.lastMain] *= pen;
       }
 
-      // 微小ノイズでブレを作る（0 のものには付けない）
-      const eps = Cfg.BIAS_NOISE_EPS || 1e-3;
+      const eps = C.BIAS_NOISE_EPS || 1e-3;
       for (const k of ['man','pin','sou','honor']) {
         if (base[k] > 0) base[k] += eps * this.deck.rng();
       }
@@ -201,51 +187,43 @@
       }
       if (entries.length === 0) return null;
       let r = this.deck.rng() * sum;
-      for (const [k, w] of entries) {
-        r -= w;
-        if (r <= 0) return k;
-      }
+      for (const [k, w] of entries) { r -= w; if (r <= 0) return k; }
       return entries[entries.length - 1][0];
     }
 
-    // 在庫だけで 1 スートを選ぶ（単発ドロー用）
     pickOneSuit(inv) {
       const w = this._weights(inv);
       return this._weightedPick(w, null);
     }
 
-    // 次ペアを計画し、実タイル 2 枚を返す
     nextPairTiles() {
+      // ★ 修正：必ず deck のメソッドを呼ぶ
       const inv0 = this.deck._countBySuit();
       const total = inv0.man + inv0.pin + inv0.sou + inv0.honor;
       if (total <= 0) return [];
 
-      // A: ゾロにするか
       let zoro = false;
       if (C.BIAS_ENABLED) {
         zoro = this._decideZoro(inv0);
-        // 在庫が 2 未満のスートしか無い場合は強制非ゾロ
         if (zoro) {
           const zoroable = ['man','pin','sou','honor'].some(s => inv0[s] >= 2);
           if (!zoroable) zoro = false;
         }
       }
 
-      // B: 走り抑制を掛けた重みでスートを選択
       const weights = this._weights(inv0);
 
       let tiles = [];
       let mainSuit = null;
 
       if (zoro) {
-        // ゾロ：在庫2以上のスートから 1 種を重み選択
         const forbid = new Set();
         for (const s of ['man','pin','sou','honor']) if (inv0[s] < 2) forbid.add(s);
         const s = this._weightedPick(weights, forbid);
         if (!s) {
-          // フォールバック：非ゾロへ
           zoro = false;
         } else {
+          // ★ 修正：this.deck._popSuit を使用
           const t1 = this.deck._popSuit(s);
           const t2 = this.deck._popSuit(s);
           if (t1) tiles.push(t1);
@@ -255,16 +233,15 @@
       }
 
       if (!zoro) {
-        // 非ゾロ：まず s1 を重み選択 → 次に s2 を（s1 以外から）
         const s1 = this._weightedPick(weights, null);
-        if (!s1) return []; // 在庫切れの安全弁
+        if (!s1) return [];
 
-        const inv1 = this.deck._countBySuit(); // s1 選択前と同じだが簡便に
+        // ★ 修正：this.deck._countBySuit を使用
+        const inv1 = this.deck._countBySuit();
         const w2 = this._weights(inv1);
         const forbid2 = new Set([s1]);
         const s2 = this._weightedPick(w2, forbid2);
         if (!s2) {
-          // s2 が選べない場合（在庫的な偏り）、s1 単色でフォールバック（在庫2未満なら単発×2回扱い）
           const t1 = this.deck._popSuit(s1);
           const t2 = this.deck._popSuit(s1);
           if (t1) tiles.push(t1);
@@ -275,11 +252,10 @@
           const t2 = this.deck._popSuit(s2);
           if (t1) tiles.push(t1);
           if (t2) tiles.push(t2);
-          mainSuit = s1; // 非ゾロの主スートは最初に選んだ方
+          mainSuit = s1;
         }
       }
 
-      // 履歴を更新
       const isZoro = (tiles.length === 2) && (tiles[0].suit === tiles[1].suit);
       this.win.push(isZoro);
       if (this.win.length > (C.BIAS_WINDOW_PAIRS || 16)) this.win.shift();
@@ -317,9 +293,6 @@
       }
     }
 
-    /**
-     * 重力を 1 回適用し、何か 1 枚でも動いたら true を返す（完全収束判定用）
-     */
     applyGravityMoved() {
       let moved = false;
       for (let x = 0; x < this.COLS; x++) {
@@ -327,21 +300,15 @@
         for (let y = this.ROWS - 1; y >= 0; y--) {
           const t = this.grid[y][x];
           if (t) {
-            if (write !== y) {
-              this.grid[write][x] = t;
-              this.grid[y][x] = null;
-              moved = true;
-            }
+            if (write !== y) { this.grid[write][x] = t; this.grid[y][x] = null; moved = true; }
             write--;
           }
         }
       }
       return moved;
     }
-    // 互換API（戻り値は使わない）
     applyGravity() { this.applyGravityMoved(); }
 
-    // 同スート4連結以上で消去
     checkAndClearChains(min = 4) {
       const vis = Array.from({ length: this.ROWS }, () => Array(this.COLS).fill(false));
       const removed = [];
@@ -641,7 +608,6 @@
       this.holdEvaluated = false;
     }
 
-    // null をキューに入れないように堅牢化
     _prepareNext(n) {
       while (this.nextQ.length < n && this.deck.remaining() > 0) {
         const t = this.deck.draw();
@@ -687,8 +653,7 @@
 
     _spawnIfNeeded() {
       if (!this.falling && this.nextQ.length >= 2) {
-        let a = this.nextQ.shift();
-        let b = this.nextQ.shift();
+        let a = this.nextQ.shift(), b = this.nextQ.shift();
         if (!a || !b) {
           this._prepareNext(2);
           if (!a && this.nextQ.length) a = this.nextQ.shift();
@@ -701,7 +666,6 @@
         }
       }
       if (!this.falling && !this.processing && this.state === 'play' && !this._canSupplyNext()) {
-        // 山が尽きた最終瞬間に、自動最終判定を実行してからリザルトへ
         if (typeof this._autoFinalHold === 'function') this._autoFinalHold();
         this._toGameOver();
       }
@@ -795,6 +759,16 @@ function keyPressed() {
   // R リスタート（ゲーム終了時のみ）
   if ((__ppl_game.state === 'gameover') && (key === 'r' || key === 'R')) {
     __ppl_game = new window.PPL.Game();
+    return;
+  }
+
+  // T: テスト実行（どの状態でも）。ゲーム側には渡さない
+  if (key === 't' || key === 'T') {
+    if (window.PPL && window.PPL.Test && typeof window.PPL.Test.runAll === 'function') {
+      window.PPL.Test.runAll();
+    } else {
+      console.warn('PPL.Test not loaded');
+    }
     return;
   }
 
