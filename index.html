@@ -11,12 +11,58 @@
   <!-- p5.js only -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
 
-  <!-- 番号順にロード（sketch.js は削除） -->
+  <!-- 番号順にロード -->
   <script src="01_ppl.config.js"></script>
   <script src="02_ppl.mahjong.js"></script>
   <script src="03_ppl.cpu.js"></script>
   <script src="04_ppl.core.js"></script>
   <script src="05_ppl.ui.js"></script>
+
+  <!-- テスト（読み込むだけ。実行は T キー） -->
+  <script src="06_ppl.test.js"></script>
 </head>
-<body></body>
+<body>
+  <style>
+  #test-console{
+    position:fixed; left:0; right:0; bottom:0;
+    max-height:40vh; overflow:auto; background:#111; color:#eee;
+    font:12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding:8px; display:none; white-space:pre-wrap; border-top:1px solid #333;
+  }
+  #test-toggle{
+    position:fixed; right:8px; bottom:40vh; background:#222; color:#eee;
+    border:1px solid #333; padding:4px 8px; cursor:pointer; font:12px ui-sans-serif;
+  }
+</style>
+<div id="test-console"></div>
+<button id="test-toggle" title="表示/非表示の切り替え">📋 Test Log</button>
+<script>
+(function(){
+  const el = document.getElementById('test-console');
+  const btn = document.getElementById('test-toggle');
+  const show = () => el.style.display = 'block';
+  const append = (tag, args) => {
+    show();
+    const text = Array.from(args).map(a=>{
+      try { return (typeof a==='object') ? JSON.stringify(a) : String(a); }
+      catch(_) { return String(a); }
+    }).join(' ');
+    el.textContent += `[${tag}] ${text}\n`;
+    el.scrollTop = el.scrollHeight;
+  };
+  const {log: L, warn: W, error: E} = console;
+  console.log  = function(){ L.apply(console, arguments); append('log', arguments); };
+  console.warn = function(){ W.apply(console, arguments); append('warn', arguments); };
+  console.error= function(){ E.apply(console, arguments); append('error', arguments); };
+  btn.addEventListener('click', ()=> {
+    el.style.display = (el.style.display==='block'?'none':'block');
+  });
+  // Tキーでログパネルを自動表示（既存のTキー機能はそのまま）
+  window.addEventListener('keydown', (e)=>{
+    if(e.key==='t' || e.key==='T') show();
+  });
+})();
+</script>
+
+</body>
 </html>
